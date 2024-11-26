@@ -1,3 +1,4 @@
+from datetime import datetime
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import Chroma
@@ -91,8 +92,8 @@ class DataHandler:
         self.db_dir = os.path.join(vectorstore_dir, self.repo_name)
         self.download_path = os.path.join(project_dir, self.repo_name) 
         self.model = chat_model
-        self.embedding_model = embedding_model     
-        self.ChatQueue =  Queue(maxsize=2)
+        self.embedding_model = embedding_model
+        self.ChatQueue = Queue(maxsize=2)
 
     # check the db dir exist or not
     def db_exists(self):
@@ -106,6 +107,7 @@ class DataHandler:
 
     # download or upload the project
     def git_clone_repo(self):
+        print("Downloading repo")
         url_parts = urlparse(self.git_url)
 
         # upload situation
@@ -166,27 +168,26 @@ class DataHandler:
         self.texts = text_splitter.split_documents(self.docs)
 
     # store the all file chunk into chromadb
-    def store_chroma(self):  
+    def store_chroma(self):
         if not os.path.exists(self.db_dir):
             os.makedirs(self.db_dir)
         print("eb:", self.embedding_model)
         db = Chroma.from_documents(self.texts, self.embedding_model, persist_directory=self.db_dir) 
-        db.persist()  
-        return db  
-        
+        db.persist()
+        return db
+
     # load 
     def load_into_db(self):
+        print("Load into db")
         if not os.path.exists(self.db_dir): 
             ## Create and load
             self.load_files()
             self.split_files()
             self.db = self.store_chroma()
         else:
-            print("start-->chromadb")
             # Just load the DB
             self.db = Chroma(persist_directory=self.db_dir, embedding_function=self.embedding_model)
-            print("end-->chromadb")
-        
+
         self.retriever = self.db.as_retriever()
         self.retriever.search_kwargs['k'] = 3
         self.retriever.search_type = 'similarity'
@@ -194,6 +195,7 @@ class DataHandler:
     # create a chain, send the message into llm and ouput the answer
     @cached(cache)
     def retrieval_qa(self, query, rsd=False, rr=False):
+        print("Retrieval QA")
         config = configparser.ConfigParser()
         config.read(config_path)
         the_selected_provider = config.get('model_providers', 'selected_provider')
@@ -210,7 +212,7 @@ class DataHandler:
         custom_prompt = ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(qa_template), 
             HumanMessagePromptTemplate.from_template("{question}")])
-        
+
         if the_selected_provider != 'localai':
             # add reranker
             if rr:
@@ -222,15 +224,14 @@ class DataHandler:
             else:
                 the_retriever = self.retriever
 
-                    
             qa = ConversationalRetrievalChain.from_llm(
-                self.model, 
-                chain_type="stuff", 
-                retriever=the_retriever, 
+                self.model,
+                chain_type="stuff",
+                retriever=the_retriever,
                 condense_question_llm = self.model,
                 return_source_documents=True,
                 combine_docs_chain_kwargs={"prompt": custom_prompt})
-            
+
             result = qa({"question": query, "chat_history": chat_history})
 
             self.update_chat_queue((query, result["answer"]))
@@ -243,27 +244,28 @@ class DataHandler:
                 return docs_strings
             else:
                 return result['answer']
-            
+
         elif the_selected_provider == 'localai':
+            print("Localai request")
             docs = self.retriever.get_relevant_documents(query)
 
             ds2s = documents_to_string(docs)
 
-            the_question = """   
-            the question: {question}"""  
+            the_question = """
+            the question: {question}"""
 
             # build the prompt with string
             combine_strings = qa_template + the_question
             prompt = combine_strings.format(context=ds2s, question=query)
             result = self.model.complete(prompt)
-            self.update_chat_queue((query, result.text))
+            content = result.text
+            self.update_chat_queue((query, content))
             if rsd:
                 return ds2s
-            return result.text
-        
+            return content
         else:
             return "Wrong provider!!!"
-        
+
     @cached(cache)
     def restrieval_qa_for_code(self, query):
         config = configparser.ConfigParser()
@@ -283,12 +285,12 @@ class DataHandler:
 
         if the_selected_provider != 'localai':
             PROMPT = PromptTemplate(input_variables=["input", "history"], template=code_template)
-            # print("-->", datetime.now())
+            print("-->", datetime.now())
             conversation = ConversationChain(
                 prompt=PROMPT,
                 llm=self.model,
             )
-            # print("-->", datetime.now())
+            print("-->", datetime.now())
             code_anaylsis = conversation.predict(input=query)
             return code_anaylsis
         elif the_selected_provider == 'localai':

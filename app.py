@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,9 +13,8 @@ from utils.helper import (
     encode_kwargs,
     model_kwargs,
 )
-import psycopg2
-from psycopg2 import sql
-import ast 
+import aiosqlite
+from aiosqlite import Connection
 from qa_model_apis import (
     get_chat_model,
     get_embedding_model,
@@ -38,19 +39,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+logger = logging.getLogger('uvicorn.error')
 config_path = os.path.join('config', 'config.ini')
 prompt_templates_path = os.path.join('config', 'prompt_templates.ini')
 config = configparser.ConfigParser()
 config.read(config_path)
 
 templates = Jinja2Templates(directory="templates")
+DB_HOST = os.environ.get("DB_HOST", "qa_pilot_chatsession.db")
 
-DB_NAME = config['database']['db_name']
-DB_USER = config['database']['db_user']
-DB_PASSWORD = config['database']['db_password']
-DB_HOST = config['database']['db_host']
-DB_PORT = config['database']['db_port']
 
 # for analyse code
 current_session = None
@@ -64,38 +61,34 @@ current_model_info = {
     "embedding_model": None
 }
 
-def init_db():
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
+conn: Connection = None
+
+async def init_db():
+    global conn
+    conn = await aiosqlite.connect(
+        DB_HOST
     )
-    cursor = conn.cursor()
-    cursor.execute('''
+    await conn.execute('''
         CREATE TABLE IF NOT EXISTS sessions (
             id BIGINT PRIMARY KEY,
             name TEXT NOT NULL,
             url TEXT NOT NULL
         )
     ''')
-    conn.commit()
     # fix the first time to set the session
-    cursor.execute('SELECT id, name, url FROM sessions LIMIT 1')
-    session = cursor.fetchone()
+    cursor = await conn.execute('SELECT id, name, url FROM sessions LIMIT 1')
+    session = await cursor.fetchone()
     if session:
         global current_session
         current_session = {'id': session[0], 'name': session[1], 'url': session[2]}
         print("Default session set to:", current_session)
-    conn.close()
 
 def load_models_if_needed():
     selected_provider = config.get('model_providers', 'selected_provider')
     selected_model = config.get(f"{selected_provider}_llm_models", 'selected_model')
     eb_selected_provider = config.get('embedding_model_providers', 'selected_provider')
     eb_selected_model = config.get(f"{eb_selected_provider}_embedding_models", 'selected_model')
-    
+
     if (current_model_info["provider"] != selected_provider or 
         current_model_info["model"] != selected_model or 
         current_model_info["eb_provider"] != eb_selected_provider or 
@@ -107,31 +100,20 @@ def load_models_if_needed():
         current_model_info["eb_model"] = eb_selected_model
         current_model_info["chat_model"] = get_chat_model(selected_provider, selected_model)
         current_model_info["embedding_model"] = get_embedding_model(eb_selected_provider, eb_selected_model, model_kwargs, encode_kwargs)
-        print(f"Loaded new models: provider={selected_provider}, model={selected_model}")
-    
-    print(f"Loaded models: provider={selected_provider}, model={selected_model}")
+        logger.info(f"Loaded new models: provider={selected_provider}, model={selected_model}")
 
-def create_message_table(session_id):
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    cursor = conn.cursor()
-    table_name = sql.Identifier(f'session_{session_id}')
-    cursor.execute(sql.SQL('''
-        CREATE TABLE IF NOT EXISTS {} (
+    logger.info(f"Loaded models: provider={selected_provider}, model={selected_model}")
+
+async def create_message_table(session_id):
+    await conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS session_{session_id} (
             id BIGSERIAL PRIMARY KEY,
             sender TEXT NOT NULL,
             text TEXT NOT NULL
         )
-    ''').format(table_name))
-    conn.commit()
-    conn.close()
+    """)
 
-init_db()
+asyncio.run(init_db())
 
 def load_config():
     config.read(config_path)
@@ -203,6 +185,7 @@ async def chat(request: Request):
     user_message = data.get('message')
     current_repo = data.get('current_repo')
     session_id = data.get('session_id')
+    logger.info(f"{user_message}, {current_repo}, {session_id}")
     if not user_message or not current_repo or not session_id:
         raise HTTPException(status_code=400, detail="Message, current_repo and session_id are required")
 
@@ -221,21 +204,10 @@ async def chat(request: Request):
             user_message = user_message[3:].strip()
             rr = True
         bot_response = data_handler.retrieval_qa(user_message, rsd=rsd, rr=rr)
-
+        logger.info(bot_response)
         # Save user message and bot response to the session table
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cursor = conn.cursor()
-        table_name = sql.Identifier(f'session_{session_id}')
-        cursor.execute(sql.SQL('INSERT INTO {} (sender, text) VALUES (%s, %s)').format(table_name), ('You', user_message))
-        cursor.execute(sql.SQL('INSERT INTO {} (sender, text) VALUES (%s, %s)').format(table_name), ('QA-Pilot', bot_response))
-        conn.commit()
-        conn.close()
+        await conn.execute(f"INSERT INTO session_{session_id} (sender, text) VALUES (?, ?)", ('You', user_message))
+        await conn.execute(f"INSERT INTO session_{session_id} (sender, text) VALUES (?, ?)",('QA-Pilot', bot_response))
 
         return JSONResponse(content={"response": bot_response})
     except Exception as e:
@@ -243,17 +215,8 @@ async def chat(request: Request):
 
 @app.get('/sessions')
 async def get_sessions():
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, name, url FROM sessions')
-    sessions = [{'id': row[0], 'name': row[1], 'url': row[2]} for row in cursor.fetchall()]
-    conn.close()
+    cursor = await conn.execute('SELECT id, name, url FROM sessions')
+    sessions = [{'id': row[0], 'name': row[1], 'url': row[2]} for row in await cursor.fetchall()]
     print(f"Fetched sessions from DB: {sessions}")
     return JSONResponse(content=sessions)
 
@@ -261,37 +224,18 @@ async def get_sessions():
 async def save_sessions(request: Request):
     sessions = await request.json()
     print(f"Received sessions to save: {sessions}")
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    cursor = conn.cursor()
     for session in sessions:
-        cursor.execute('INSERT INTO sessions (id, name, url) VALUES (%s, %s, %s) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, url = EXCLUDED.url',
+        print(f"INSERT INTO sessions (id, name, url) VALUES ({session['id']}, {session['name']}, {session['url']}) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, url = EXCLUDED.url")
+        await conn.execute('INSERT INTO sessions (id, name, url) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, url = EXCLUDED.url',
                        (session['id'], session['name'], session['url']))
-        create_message_table(session['id'])
-    conn.commit()
-    conn.close()
+        await create_message_table(session['id'])
     print("Saved sessions to DB")
     return JSONResponse(content={"message": "Sessions saved successfully!"})
 
 @app.get('/messages/{session_id}')
 async def get_messages(session_id: int):
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    cursor = conn.cursor()
-    table_name = sql.Identifier(f'session_{session_id}')
-    cursor.execute(sql.SQL('SELECT sender, text FROM {}').format(table_name))
-    messages = [{'sender': row[0], 'text': row[1]} for row in cursor.fetchall()]
-    conn.close()
+    cursor = await conn.execute(f'SELECT sender, text FROM session_{session_id}')
+    messages = [{'sender': row[0], 'text': row[1]} for row in await cursor.fetchall()]
     print(f"Fetched messages from session {session_id}")
     return JSONResponse(content=messages)
 
@@ -304,26 +248,16 @@ async def update_current_session(request: Request):
 @app.delete('/sessions/{session_id}')
 async def delete_session(session_id: int):
     print(f"Deleting session with ID: {session_id}")
-
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
     cursor = conn.cursor()
 
     try:
-        cursor.execute('SELECT name FROM sessions WHERE id = %s', (session_id,))
-        session = cursor.fetchone()
+        cursor = await conn.execute('SELECT name FROM sessions WHERE id = ?', (session_id,))
+        session = await cursor.fetchone()
         if session:
             session_name = session[0]
             print("anem", session_name)
-        cursor.execute('DELETE FROM sessions WHERE id = %s', (session_id,))
-        conn.commit()
-        cursor.execute(sql.SQL('DROP TABLE IF EXISTS {}').format(sql.Identifier(f'session_{session_id}')))
-        conn.commit()
+        await conn.execute('DELETE FROM sessions WHERE id = ?', (session_id,))
+        await conn.execute(f'DROP TABLE IF EXISTS session_{session_id}')
         # remove the git clone project
         remove_project_path = os.path.join("projects", session_name)
         remove_directory(remove_project_path)
@@ -332,8 +266,7 @@ async def delete_session(session_id: int):
     except Exception as e:
         print(f"Error deleting session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
+
 
 # api key handling functions
 @app.post('/check_api_key')
@@ -506,8 +439,8 @@ async def go_data(filepath: str):
     code_data = parse_go_code(filepath)
     return JSONResponse(content=code_data)
 
-@app.get('/go_directory')
-async def directory():
+@app.get('/directory')
+async def go_directory():
     current_repo_path = read_current_repo_path(current_session)
     if current_repo_path is None:
         raise HTTPException(status_code=404, detail="Repository path not set or not found")

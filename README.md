@@ -62,44 +62,32 @@ QA-Pilot is an interactive chat project that leverages online/local LLM for rapi
 ![code-graph-new](https://github.com/reid41/QA-Pilot/assets/25558653/8c47ea00-d703-42b5-b43b-d40796e7de1d)
 
 To deploy QA-Pilot, you can follow the below steps:
-
-1. Clone the QA-Pilot repository:
-
-```shell
-git clone https://github.com/reid41/QA-Pilot.git
-cd QA-Pilot
-```
-
-2. Install [conda](https://www.anaconda.com/download) for virtual environment management. Create and activate a new virtual environment.
+1. Install the required dependencies:
 
 ```shell
-conda create -n QA-Pilot python=3.10.14
-conda activate QA-Pilot
-```
-
-3. Install the required dependencies:
-
-```shell
+python --version
+Python 3.10.14
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-4. Install the pytorch with cuda [pytorch](https://pytorch.org/get-started/locally/)
+2. Install the pytorch with cuda [pytorch](https://pytorch.org/get-started/locally/)
 
-5. Setup providers
+3. Setup providers
 
 * For setup [ollama website](https://ollama.com/) and [ollama github](https://github.com/ollama/ollama) to manage the local LLM. 
 e.g.
 
 ```shell
 ollama pull <model_name>
-
 ollama list
 ```
 
 * For setup [localAI](https://localai.io/) and [LocalAI github](https://github.com/mudler/LocalAI) to manage the local LLM, set the localAI `base_url` in config/config.ini.
 e.g.
 ```shell
-docker run -p 8080:8080 --name local-ai -ti localai/localai:latest-aio-cpu
+docker run -p 8080:8080 --name local-ai -ti docker.io/localai/localai:latest-aio-cpu
 # Do you have a Nvidia GPUs? Use this instead
 # CUDA 11
 # docker run -p 8080:8080 --gpus all --name local-ai -ti localai/localai:latest-aio-gpu-nvidia-cuda-11
@@ -131,32 +119,13 @@ go build -o parser parser.go
 ./parser /path/test.go
 ```
 
-6. Set the related parameters in `config/config.ini`, e.g. `model provider`, `model`, `variable`, `Ollama API url` and setup the [Postgresql](https://www.postgresql.org/download/) env
-```shell
-# create the db, e.g.
-CREATE DATABASE qa_pilot_chatsession_db;
-CREATE USER qa_pilot_user WITH ENCRYPTED PASSWORD 'qa_pilot_p';
-GRANT ALL PRIVILEGES ON DATABASE qa_pilot_chatsession_db TO qa_pilot_user;
+4. Set the related parameters in `config/config.ini`, e.g. `model provider`, `model`, `variable`, `Ollama API url`
 
-# set the connection
-cat config/config.ini
-[database]
-db_name = qa_pilot_chatsession_db
-db_user = qa_pilot_user
-db_password = qa_pilot_p
-db_host = localhost
-db_port = 5432
-
-
-# set the arg in script and test connection
-python check_postgresql_connection.py
-```
-
-7. Download and install [node.js](https://nodejs.org/en/download/package-manager) and Set up the fontend env in one terminal
+5. Download and install [node.js](https://nodejs.org/en/download/package-manager) and Set up the fontend env in one terminal
 ```shell
 # make sure the backend server host ip is correct, localhost is by default
 cat svelte-app/src/config.js
-export const API_BASE_URL = 'http://localhost:5000';
+export const API_BASE_URL = 'http://0.0.0.0:5000';
 
 # install deps
 cd svelte-app
@@ -165,7 +134,7 @@ npm install
 npm run dev
 ```
 
-8. Run the backend QA-Pilot in another terminal:
+6. Run the backend QA-Pilot in another terminal:
 
 ```shell
 python qa_pilot_run.py
